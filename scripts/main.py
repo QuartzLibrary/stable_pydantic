@@ -21,14 +21,14 @@ class Complete(pydantic.BaseModel):
     f_2: bool
     f_3: int
     f_4: float
-    f_5: complex
+    f_5: complex = complex(1, 2)
     f_6: str
-    f_7: bytes
-    f_8: datetime
-    f_9: date
-    f_10: time
-    f_11: timedelta
-    f_12: Decimal
+    f_7: bytes = b"test"
+    f_8: datetime = datetime(2025, 12, 31, 12, 59, 59)
+    f_9: date = date(2025, 12, 31)
+    f_10: time = time(12, 59, 59)
+    f_11: timedelta = timedelta(days=1, hours=2, minutes=3, seconds=4)
+    f_12: Decimal = Decimal("1.23")
     f_13: list[int]
     f_14: set[int]
     f_15: tuple[int, int]
@@ -41,7 +41,7 @@ class Complete(pydantic.BaseModel):
 
 
 class A(pydantic.BaseModel):
-    local: str
+    local: str = pydantic.Field()
     local2: int
 
 
@@ -238,7 +238,6 @@ class ModelNode(pydantic.BaseModel):
             if node != last:
                 source += "\n\n\n"
 
-        print(touched_base_types)
         return (
             touched_base_types.imports() + "import pydantic" + "\n\n\n" + source + "\n"
         )
@@ -263,6 +262,7 @@ class ModelNode(pydantic.BaseModel):
         return ast.parse(inspect.getsource(self.node))
 
     def aliased_name(self) -> str:
+        # TODO: rename anything that might collide with primitive types.
         if self.alias is None:
             return self.node.__name__
         else:
@@ -496,39 +496,47 @@ def clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
         else:
             return None
 
-        if isinstance(actual_default, pydantic.BaseModel):
-            # For Pydantic models, serialize to JSON and load with model_validate_json
+        if isinstance(
+            actual_default, (type(None), bool, int, float, str, bytes, complex, Decimal)
+        ):
+            new_value = ast.Constant(value=actual_default)
+        elif isinstance(actual_default, (datetime, date, time, timedelta)):
+            stringified_constant = ast.unparse(ast.Constant(value=actual_default))
+            assert stringified_constant.startswith("datetime.")
+            reparsed_module = ast.parse(stringified_constant[len("datetime.") :])
+            assert len(reparsed_module.body) == 1
+            reparsed_constant = reparsed_module.body[0].value  # type: ignore
+            assert isinstance(reparsed_constant, ast.Call)
+            new_value = reparsed_constant
+        elif isinstance(actual_default, pydantic.BaseModel):
+            # For Pydantic models, serialize to JSON and load inline with model_validate_json
             model_type = type(actual_default)
             model_node = model.all.get(model_type)
             assert model_node is not None, (
                 f"Model type {model_type} not found in the model tree."
             )
 
-            # Serialize to JSON string
-            json_str = actual_default.model_dump_json()
-
-            # Create: ModelName.model_validate_json("...")
+            # ModelName.model_validate_json("...")
             new_value = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id=model_node.aliased_name(), ctx=ast.Load()),
                     attr="model_validate_json",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=json_str)],
+                args=[ast.Constant(value=actual_default.model_dump_json())],
                 keywords=[],
             )
         else:
-            # For non-Pydantic types, use JSON serialization
-            json_str = json.dumps(actual_default)
             touched_base_types.uses_json = True
 
+            # json.loads("...")
             new_value = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="json", ctx=ast.Load()),
                     attr="loads",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=json_str)],
+                args=[ast.Constant(value=json.dumps(actual_default))],
                 keywords=[],
             )
 
@@ -713,8 +721,6 @@ def parse_schema_file_name(name: str) -> int | None:
     if not name.startswith("schema_") or not name.endswith(".py"):
         return None
     number_part = name[len("schema_") : -len(".py")]
-    print(name)
-    print(number_part)
     try:
         return int(number_part)
     except ValueError:
