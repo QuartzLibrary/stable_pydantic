@@ -48,9 +48,10 @@ class A(pydantic.BaseModel):
 class Model(pydantic.BaseModel):
     local: A = pydantic.Field(
         default_factory=lambda: A(
-            local="test",
+            local='te"st',
             local2=10,
-        )
+        ),
+        title="Local",
     )
 
     complete: Complete
@@ -104,6 +105,7 @@ class TouchedBaseTypes(pydantic.BaseModel):
     timedelta: bool = False
     optional: bool = False
     union: bool = False
+    uses_json: bool = False
 
     def touch(self, field_type: type[Any]):
         if field_type is type(None):
@@ -139,8 +141,7 @@ class TouchedBaseTypes(pydantic.BaseModel):
         def filter(items: list[tuple[str, bool]]) -> list[str]:
             return [item[0] for item in items if item[1]]
 
-        imports = ""
-
+        # import json
         # from datetime import date, datetime, time, timedelta
         # from decimal import Decimal
         # from typing import Optional, Union
@@ -165,6 +166,10 @@ class TouchedBaseTypes(pydantic.BaseModel):
             ]
         )
 
+        imports = ""
+
+        if self.uses_json:
+            imports += "import json\n"
         if import_datetime:
             imports += f"from datetime import {', '.join(import_datetime)}\n"
         if import_decimal:
@@ -172,7 +177,7 @@ class TouchedBaseTypes(pydantic.BaseModel):
         if import_typing:
             imports += f"from typing import {', '.join(import_typing)}\n"
 
-        if import_datetime + import_decimal + import_typing:
+        if self.uses_json or import_datetime + import_decimal + import_typing:
             imports += "\n"
 
         return imports
@@ -186,6 +191,7 @@ class TouchedBaseTypes(pydantic.BaseModel):
             timedelta=self.timedelta or value.timedelta,
             optional=self.optional or value.optional,
             union=self.union or value.union,
+            uses_json=self.uses_json or value.uses_json,
         )
 
 
@@ -447,6 +453,7 @@ def clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
 
         elif not isinstance(field_type, type):
             raise ValueError(f"Unsupported value {field_type}")
+
         elif issubclass(field_type, pydantic.BaseModel):
             inline_model = model.all[field_type]
             if inline_model.alias is not None:
@@ -460,10 +467,105 @@ def clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
                     raise ValueError(
                         f"Expected name or attribute annotation, got: {ast.dump(annotation)}"
                     )
+
         else:
             raise ValueError(f"Unsupported type {field_type}")
 
         return
+
+    def clean_field_default(
+        default: Any,
+        default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None,
+        value: ast.expr,
+    ) -> ast.expr | None:
+        """Clean field default values by serializing to JSON and replacing with json.loads()."""
+        import json
+
+        actual_default: Any
+        if default_factory is not None:
+            assert default is pydantic.fields.PydanticUndefined
+
+            # TODO: how to get the validated data?
+            assert 0 == len(inspect.signature(default_factory).parameters), (
+                "Default factory using the validated data is not currently supported."
+            )
+            actual_default = default_factory()  # type: ignore (can't tell we asserted no parameters)
+        elif default is not pydantic.fields.PydanticUndefined:
+            assert default_factory is None
+            actual_default = default
+        else:
+            return None
+
+        if isinstance(actual_default, pydantic.BaseModel):
+            # For Pydantic models, serialize to JSON and load with model_validate_json
+            model_type = type(actual_default)
+            model_node = model.all.get(model_type)
+            assert model_node is not None, (
+                f"Model type {model_type} not found in the model tree."
+            )
+
+            # Serialize to JSON string
+            json_str = actual_default.model_dump_json()
+
+            # Create: ModelName.model_validate_json("...")
+            new_value = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id=model_node.aliased_name(), ctx=ast.Load()),
+                    attr="model_validate_json",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=json_str)],
+                keywords=[],
+            )
+        else:
+            # For non-Pydantic types, use JSON serialization
+            json_str = json.dumps(actual_default)
+            touched_base_types.uses_json = True
+
+            new_value = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="json", ctx=ast.Load()),
+                    attr="loads",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=json_str)],
+                keywords=[],
+            )
+
+        # Check if value is a Field() call, and if so update its arguments
+        if isinstance(value, ast.Call) and (
+            (isinstance(value.func, ast.Attribute) and value.func.attr == "Field")
+            or (isinstance(value.func, ast.Name) and value.func.id == "Field")
+        ):
+            # Replace 'default' or 'default_factory' keyword arguments
+            modified = False
+
+            for keyword in value.keywords:
+                if keyword.arg == "default_factory":
+                    assert not modified, "Multiple default or default_factory keywords"
+                    modified = True
+
+                    keyword.value = ast.Lambda(
+                        args=ast.arguments(
+                            posonlyargs=[],
+                            args=[],
+                            kwonlyargs=[],
+                            kw_defaults=[],
+                            defaults=[],
+                        ),
+                        body=new_value,
+                    )
+                elif keyword.arg == "default":
+                    assert not modified, "Multiple default or default_factory keywords"
+                    modified = True
+
+                    keyword.value = new_value
+
+            assert modified, "No default or default_factory keyword found"
+
+            return value
+        else:
+            return new_value
 
     assert len(tree.body) == 1
     assert isinstance(tree.body[0], ast.ClassDef)
@@ -483,6 +585,15 @@ def clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
             ast_node.annotation = a
 
         clean_field_type(model_field.annotation, ast_node.annotation, replace)
+
+        if ast_node.value is not None:
+            cleaned_default = clean_field_default(
+                model_field.default,
+                model_field.default_factory,
+                ast_node.value,
+            )
+            if cleaned_default is not None:
+                ast_node.value = cleaned_default
 
     return touched_base_types
 
