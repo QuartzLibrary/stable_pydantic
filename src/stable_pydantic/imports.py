@@ -5,7 +5,7 @@ from typing import Any, Self
 import pydantic
 
 
-class TouchedBaseTypes(pydantic.BaseModel):
+class Imports(pydantic.BaseModel):
     decimal: bool = False
     datetime: bool = False
     date: bool = False
@@ -90,8 +90,8 @@ class TouchedBaseTypes(pydantic.BaseModel):
 
         return imports
 
-    def combine(self, value: Self) -> "TouchedBaseTypes":
-        return TouchedBaseTypes(
+    def combine(self, value: Self) -> "Imports":
+        return Imports(
             decimal=self.decimal or value.decimal,
             datetime=self.datetime or value.datetime,
             date=self.date or value.date,

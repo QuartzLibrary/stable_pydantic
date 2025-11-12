@@ -9,12 +9,12 @@ from typing import Any, Callable, Generator
 
 import pydantic
 
-from stable_pydantic.imports import TouchedBaseTypes
+from stable_pydantic.imports import Imports
 from stable_pydantic.model_graph import ModelNode
 from stable_pydantic.utils import BASE_TYPES, COMPOSITE_TYPES
 
 
-def clean(model: ModelNode) -> tuple[str, TouchedBaseTypes]:
+def clean(model: ModelNode) -> tuple[str, Imports]:
     tree = model.ast()
     assert len(tree.body) == 1
     assert isinstance(tree.body[0], ast.ClassDef)
@@ -54,8 +54,8 @@ def _keep_only_class_fields(tree: ast.Module):
     tree.body[0].body = new_body
 
 
-def _clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
-    touched_base_types = TouchedBaseTypes()
+def _clean(model: ModelNode, tree: ast.Module) -> Imports:
+    imports = Imports()
 
     assert len(tree.body) == 1
     assert isinstance(tree.body[0], ast.ClassDef)
@@ -79,7 +79,7 @@ def _clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
             ast_node.annotation,
             replace,
             model.all,
-            touched_base_types,
+            imports,
         )
 
         if ast_node.value is not None:
@@ -88,12 +88,12 @@ def _clean(model: ModelNode, tree: ast.Module) -> TouchedBaseTypes:
                 model_field.default_factory,
                 ast_node.value,
                 model.all,
-                touched_base_types,
+                imports,
             )
             if cleaned_default is not None:
                 ast_node.value = cleaned_default
 
-    return touched_base_types
+    return imports
 
 
 def _clean_field_type(
@@ -101,13 +101,13 @@ def _clean_field_type(
     annotation: ast.expr,
     replace: Callable[[ast.expr], None],
     all: dict[type[pydantic.BaseModel], ModelNode],
-    touched_base_types: TouchedBaseTypes,
+    imports: Imports,
 ):
     if field_type is None:
         raise ValueError(f"Field type is None: {annotation}")
 
     elif field_type in BASE_TYPES:
-        touched_base_types.touch(field_type)
+        imports.touch(field_type)
         # TODO: assert the types match.
         pass
 
@@ -141,9 +141,7 @@ def _clean_field_type(
         for inner_field_type, (inner_annotation, replace) in zip(
             field_types, iter_binop(annotation), strict=True
         ):
-            _clean_field_type(
-                inner_field_type, inner_annotation, replace, all, touched_base_types
-            )
+            _clean_field_type(inner_field_type, inner_annotation, replace, all, imports)
 
     elif typing.get_origin(field_type) is typing.Union:
         field_types = list(typing.get_args(field_type))
@@ -156,18 +154,16 @@ def _clean_field_type(
             assert len(annotations) == 1
             field_types.remove(NoneType)
             assert len(field_types) == 1
-            touched_base_types.optional = True
+            imports.optional = True
         elif isinstance(annotation.value, ast.Name) and annotation.value.id == "Union":
-            touched_base_types.union = True
+            imports.union = True
         else:
             raise ValueError(f"Unsupported union type {annotation}")
 
         for inner_field_type, (inner_annotation, replace) in zip(
             field_types, annotations, strict=True
         ):
-            _clean_field_type(
-                inner_field_type, inner_annotation, replace, all, touched_base_types
-            )
+            _clean_field_type(inner_field_type, inner_annotation, replace, all, imports)
 
     elif typing.get_origin(field_type) in COMPOSITE_TYPES:
         field_types = list(typing.get_args(field_type))
@@ -178,9 +174,7 @@ def _clean_field_type(
         for inner_field_type, (inner_annotation, replace) in zip(
             field_types, annotations, strict=True
         ):
-            _clean_field_type(
-                inner_field_type, inner_annotation, replace, all, touched_base_types
-            )
+            _clean_field_type(inner_field_type, inner_annotation, replace, all, imports)
 
     elif not isinstance(field_type, type):
         raise ValueError(f"Unsupported value {field_type}")
@@ -233,7 +227,7 @@ def _clean_field_default(
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any] | None,
     value: ast.expr,
     all: dict[type[pydantic.BaseModel], ModelNode],
-    touched_base_types: TouchedBaseTypes,
+    imports: Imports,
 ) -> ast.expr | None:
     """Clean field default values by serializing to JSON and replacing with json.loads()."""
     import json
@@ -284,7 +278,7 @@ def _clean_field_default(
             keywords=[],
         )
     else:
-        touched_base_types.uses_json = True
+        imports.uses_json = True
 
         # json.loads("...")
         new_value = ast.Call(

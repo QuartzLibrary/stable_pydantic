@@ -6,7 +6,7 @@ from typing import Any, OrderedDict, Self
 
 import pydantic
 
-from stable_pydantic.imports import TouchedBaseTypes
+from stable_pydantic.imports import Imports
 from stable_pydantic.utils import BASE_TYPES, COMPOSITE_TYPES_EXT
 
 
@@ -45,19 +45,17 @@ class ModelNode(pydantic.BaseModel):
         last = nodes[-1] if nodes else None
 
         source = ""
-        touched_base_types = TouchedBaseTypes()
+        imports = Imports()
         for node in nodes:
             new, new_touched_base_types = node.clean_source()
             source += new
-            touched_base_types = touched_base_types.combine(new_touched_base_types)
+            imports = imports.combine(new_touched_base_types)
             if node != last:
                 source += "\n\n\n"
 
-        return (
-            touched_base_types.imports() + "import pydantic" + "\n\n\n" + source + "\n"
-        )
+        return imports.imports() + "import pydantic" + "\n\n\n" + source + "\n"
 
-    def clean_source(self) -> tuple[str, TouchedBaseTypes]:
+    def clean_source(self) -> tuple[str, Imports]:
         from stable_pydantic import clean
 
         return clean.clean(self)
