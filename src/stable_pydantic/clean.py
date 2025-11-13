@@ -15,14 +15,14 @@ from stable_pydantic.utils import BASE_TYPES, COMPOSITE_TYPES
 
 
 def clean(model: ModelNode) -> tuple[str, Imports]:
-    tree = model.ast()
+    tree = model.get_ast()
     assert len(tree.body) == 1
     assert isinstance(tree.body[0], ast.ClassDef)
-    _keep_only_class_fields(tree)
+    keep_only_class_fields(tree.body[0])
     assert len([v for v in tree.body[0].body if not isinstance(v, ast.Pass)]) == len(
         model.node.model_fields
     )
-    touched_base_types = _clean(model, tree)
+    touched_base_types = _clean(model, tree.body[0])
     source = ast.unparse(tree)
     name = model.node.__name__
     return source.replace(
@@ -31,12 +31,9 @@ def clean(model: ModelNode) -> tuple[str, Imports]:
     ), touched_base_types
 
 
-def _keep_only_class_fields(tree: ast.Module):
-    assert len(tree.body) == 1
-    assert isinstance(tree.body[0], ast.ClassDef)
-
+def keep_only_class_fields(class_def: ast.ClassDef):
     new_body = []
-    for node in tree.body[0].body:
+    for node in class_def.body:
         if isinstance(node, ast.AnnAssign):
             # Field with type annotation like `name: str` or `name: str = value`
             new_body.append(node)
@@ -51,16 +48,13 @@ def _keep_only_class_fields(tree: ast.Module):
         # If no fields, add pass statement
         new_body: list[ast.stmt] = [ast.Pass()]
 
-    tree.body[0].body = new_body
+    class_def.body = new_body
 
 
-def _clean(model: ModelNode, tree: ast.Module) -> Imports:
+def _clean(model: ModelNode, tree: ast.ClassDef) -> Imports:
     imports = Imports()
 
-    assert len(tree.body) == 1
-    assert isinstance(tree.body[0], ast.ClassDef)
-
-    for raw in tree.body[0].body:
+    for raw in tree.body:
         if isinstance(raw, ast.Pass):
             continue
 
@@ -115,31 +109,13 @@ def _clean_field_type(
         raise ValueError(f"Enum type {field_type} is todo")
 
     elif typing.get_origin(field_type) is UnionType:
-
-        def iter_binop(
-            node: ast.BinOp,
-        ) -> Generator[tuple[ast.expr, Callable[[ast.expr], None]], None, None]:
-            def replace_left(a: ast.expr):
-                node.left = a
-
-            def replace_right(a: ast.expr):
-                node.right = a
-
-            if isinstance(node.left, ast.BinOp):
-                assert isinstance(node.left.op, ast.BitOr)
-                yield from iter_binop(node.left)
-            else:
-                yield node.left, replace_left
-
-            yield node.right, replace_right
-
         field_types = list(typing.get_args(field_type))
 
         assert isinstance(annotation, ast.BinOp)
         assert isinstance(annotation.op, ast.BitOr)
 
         for inner_field_type, (inner_annotation, replace) in zip(
-            field_types, iter_binop(annotation), strict=True
+            field_types, _iter_binop(annotation), strict=True
         ):
             _clean_field_type(inner_field_type, inner_annotation, replace, all, imports)
 
@@ -176,9 +152,6 @@ def _clean_field_type(
         ):
             _clean_field_type(inner_field_type, inner_annotation, replace, all, imports)
 
-    elif not isinstance(field_type, type):
-        raise ValueError(f"Unsupported value {field_type}")
-
     elif issubclass(field_type, pydantic.BaseModel):
         inline_model = all[field_type]
         if inline_model.alias is not None:
@@ -197,29 +170,6 @@ def _clean_field_type(
         raise ValueError(f"Unsupported type {field_type}")
 
     return
-
-
-def _unpack_composite_annotation(
-    annotation: ast.Subscript,
-) -> list[tuple[ast.expr, Callable[[ast.expr], None]]]:
-    """Extract inner type annotations from subscripted composite types like list[int] or dict[str, int]."""
-    slice_node = annotation.slice
-    if isinstance(slice_node, ast.Tuple):
-        # Multiple type parameters like dict[str, int] or tuple[int, str]
-
-        def replace_multi(a: ast.expr, i: int):
-            slice_node.elts[i] = a
-
-        return [
-            (elt, lambda a: replace_multi(a, i))
-            for i, elt in enumerate(slice_node.elts)
-        ]
-    else:
-        # Single type parameter like list[int] or set[str]
-        def replace(a: ast.expr):
-            annotation.slice = a
-
-        return [(slice_node, replace)]
 
 
 def _clean_field_default(
@@ -325,3 +275,44 @@ def _clean_field_default(
         return value
     else:
         return new_value
+
+
+def _unpack_composite_annotation(
+    annotation: ast.Subscript,
+) -> list[tuple[ast.expr, Callable[[ast.expr], None]]]:
+    """Extract inner type annotations from subscripted composite types like list[int] or dict[str, int]."""
+    slice_node = annotation.slice
+    if isinstance(slice_node, ast.Tuple):
+        # Multiple type parameters like dict[str, int] or tuple[int, str]
+
+        def replace_multi(a: ast.expr, i: int):
+            slice_node.elts[i] = a
+
+        return [
+            (elt, lambda a: replace_multi(a, i))
+            for i, elt in enumerate(slice_node.elts)
+        ]
+    else:
+        # Single type parameter like list[int] or set[str]
+        def replace(a: ast.expr):
+            annotation.slice = a
+
+        return [(slice_node, replace)]
+
+
+def _iter_binop(
+    node: ast.BinOp,
+) -> Generator[tuple[ast.expr, Callable[[ast.expr], None]], None, None]:
+    def replace_left(a: ast.expr):
+        node.left = a
+
+    def replace_right(a: ast.expr):
+        node.right = a
+
+    if isinstance(node.left, ast.BinOp):
+        assert isinstance(node.left.op, ast.BitOr)
+        yield from _iter_binop(node.left)
+    else:
+        yield node.left, replace_left
+
+    yield node.right, replace_right

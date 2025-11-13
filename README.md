@@ -6,7 +6,7 @@
 
 TODO:
 - [x] Reference files
-- [ ] Compatibility check
+- [x] Compatibility check
 - [ ] Manual migrations
 
 Minor TODOs:

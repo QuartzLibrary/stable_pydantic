@@ -1,4 +1,6 @@
+import types
 from pathlib import Path
+from typing import Any
 
 import pydantic
 
@@ -73,6 +75,31 @@ class SchemaEntry(pydantic.BaseModel):
         assert self.source == model.clean_source_recursive(), (
             f"Schema at version {self.version} is not the same as live schema for model {model.__name__}."
         )
+
+    def isolated_model(self) -> ModelNode:
+        # Create a new module with a unique name
+        module_name = f"schema_{self.version}"
+        module = types.ModuleType(module_name)
+        module.__file__ = str(self.dir / f"schema_{self.version}.py")
+
+        # Execute the source code in the module's namespace
+        exec(self.source, module.__dict__)
+
+        # TODO: avoid this hack, but for now the largest must be the root.
+
+        models = [
+            obj
+            for obj in module.__dict__.values()
+            if isinstance(obj, type)
+            and issubclass(obj, pydantic.BaseModel)
+            and obj is not pydantic.BaseModel
+        ]
+        models.sort(key=lambda x: len(x.model_json_schema()), reverse=True)
+
+        return ModelNode.new(models[0])
+
+    def json_schema(self) -> dict[str, Any]:
+        return self.isolated_model().model_json_schema()
 
 
 class MigrationEntry(pydantic.BaseModel):
@@ -155,6 +182,37 @@ class ModelEntry(pydantic.BaseModel):
         if latest_version is not None:
             self.versions[latest_version].assert_equal(self.live)
 
+    def assert_compatible(self, forward: bool, backward: bool):
+        assert forward or backward, "Assert compatibility in at least one direction."
+
+        if not self.versions:
+            return
+
+        from stable_pydantic import compatibility
+
+        versions = sorted(self.versions.values(), key=lambda x: x.version)
+
+        print([v.version for v in versions])
+
+        for i in range(len(versions) - 1):
+            from_version = versions[i]
+            to_version = versions[i + 1]
+            compat = compatibility.check(from_version, to_version)
+            if forward:
+                assert compat.forward_compatible, (
+                    f"For model {self.live.node.__name__}, version {from_version.version}"
+                    + f" is not stricter than version {to_version.version}. Forward compatibility is not maintained."
+                    + f"\nfrom_schema: {from_version.json_schema()}"
+                    + f"\nto_schema: {to_version.json_schema()}"
+                )
+            if backward:
+                assert compat.backward_compatible, (
+                    f"For model {self.live.node.__name__}, version {to_version.version}"
+                    + f" is not stricter than version {from_version.version}. Backward compatibility is not maintained."
+                    + f"\nfrom_schema: {from_version.json_schema()}"
+                    + f"\nto_schema: {to_version.json_schema()}"
+                )
+
 
 class SchemaFilesystem(pydantic.BaseModel):
     models: dict[type[pydantic.BaseModel], ModelEntry]
@@ -190,13 +248,23 @@ class SchemaFilesystem(pydantic.BaseModel):
         for model in self.models.values():
             model.assert_unchanged()
 
+    def assert_compatible_schemas(self, forward: bool = False, backward: bool = True):
+        """
+        Assert that the schemas are compatible in the given direction.
+
+        Forward compatible: old clients keep working with new data.
+        Backward compatible: new clients keep working with old data.
+        """
+        for model in self.models.values():
+            model.assert_compatible(forward, backward)
+
 
 def _read_schema_files(at: Path, model: type[pydantic.BaseModel]) -> ModelEntry:
     at = at / model.__name__
     at.mkdir(parents=True, exist_ok=True)
 
     current: CurrentEntry | None = None
-    version: dict[int, SchemaEntry] = {}
+    versions: dict[int, SchemaEntry] = {}
     migrations: dict[tuple[int, int], MigrationEntry] = {}
 
     for file in at.glob("*.py"):
@@ -207,7 +275,7 @@ def _read_schema_files(at: Path, model: type[pydantic.BaseModel]) -> ModelEntry:
         elif file.name == "current.py":
             current = CurrentEntry.open(file)
         elif number is not None:
-            version[number] = SchemaEntry.open(at, number)
+            versions[number] = SchemaEntry.open(at, number)
         elif migration is not None:
             migrations[migration] = MigrationEntry.open(
                 migration[0], migration[1], file
@@ -215,11 +283,15 @@ def _read_schema_files(at: Path, model: type[pydantic.BaseModel]) -> ModelEntry:
         else:
             raise ValueError(f"Invalid schema file name: {file.name}")
 
+    for from_version, to_version in migrations.keys():
+        assert from_version in versions
+        assert to_version in versions
+
     return ModelEntry(
         live=ModelNode.new(model),
         path=at,
         current=current,
-        versions=version,
+        versions=versions,
         migrations=migrations,
     )
 

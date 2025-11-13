@@ -60,8 +60,14 @@ class ModelNode(pydantic.BaseModel):
 
         return clean.clean(self)
 
-    def ast(self) -> ast.Module:
+    def get_ast(self) -> ast.Module:
         return ast.parse(inspect.getsource(self.node))
+
+    def get_class_ast(self) -> ast.ClassDef:
+        tree = self.get_ast()
+        assert len(tree.body) == 1
+        assert isinstance(tree.body[0], ast.ClassDef)
+        return tree.body[0]
 
     def aliased_name(self) -> str:
         # TODO: rename anything that might collide with primitive types.
