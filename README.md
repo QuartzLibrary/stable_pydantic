@@ -5,7 +5,7 @@
 > ⚠️ This README.md describes the intended final product of this repo, but we aren't there yet. It's also likely to change as work on it progresses.
 
 TODO:
-- [ ] Reference files
+- [x] Reference files
 - [ ] Compatibility check
 - [ ] Manual migrations
 

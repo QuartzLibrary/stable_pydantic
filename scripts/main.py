@@ -7,6 +7,7 @@ import mod
 import pydantic
 
 from stable_pydantic.model_graph import ModelNode
+from stable_pydantic.source import SchemaFilesystem
 
 
 class Nope:
@@ -163,7 +164,10 @@ def parse_schema_file_name(name: str) -> int | None:
 
 
 def main():
-    upgrade_current_schema(Model, "./schemas")
+    schema_filesystem = SchemaFilesystem.open("./schemas", [Model])
+    schema_filesystem.update_current()
+    schema_filesystem.assert_unchanged_schemas()
+    # upgrade_current_schema(Model, "./schemas")
 
     # node = ModelNode.new(Model)
     # print(node.recursive_source())
