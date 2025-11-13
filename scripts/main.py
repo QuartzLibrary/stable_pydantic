@@ -165,7 +165,8 @@ def parse_schema_file_name(name: str) -> int | None:
 
 def main():
     schema_filesystem = SchemaFilesystem.open("./schemas", [Model])
-    schema_filesystem.update_current()
+    # schema_filesystem.update_current()
+    schema_filesystem.update_schemas()
     schema_filesystem.assert_unchanged_schemas()
     # upgrade_current_schema(Model, "./schemas")
 

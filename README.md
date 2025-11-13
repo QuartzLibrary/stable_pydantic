@@ -101,7 +101,7 @@ def test_update_schemas(request):
     # pytest -m stable_pydantic
     stable_pydantic.skip_if_not_migrating()
   
-    # Add the new schema
+    # Add a new schema & update current.
     stable_pydantic.update_schemas("./schemas", MODELS)
 ```
 

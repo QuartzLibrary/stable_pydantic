@@ -13,6 +13,8 @@ class CurrentEntry(pydantic.BaseModel):
 
     @staticmethod
     def create(path: Path, model: ModelNode) -> "CurrentEntry":
+        print(f"Creating current.py for {model.node.__name__}.")
+
         source = model.clean_source_recursive()
         path.write_text(source)
         return CurrentEntry(
@@ -45,24 +47,26 @@ class CurrentEntry(pydantic.BaseModel):
 
 class SchemaEntry(pydantic.BaseModel):
     version: int
-    path: Path
+    dir: Path
     source: str
 
     @staticmethod
-    def create(version: int, path: Path, source: str) -> "SchemaEntry":
-        path.write_text(source)
+    def create(dir: Path, version: int, model: ModelNode) -> "SchemaEntry":
+        print(f"Creating schema at version {version} for {model.node.__name__}.")
+        source = model.clean_source_recursive()
+        (dir / f"schema_{version}.py").write_text(source)
         return SchemaEntry(
             version=version,
-            path=path,
+            dir=dir,
             source=source,
         )
 
     @staticmethod
-    def open(version: int, path: Path) -> "SchemaEntry":
+    def open(dir: Path, version: int) -> "SchemaEntry":
         return SchemaEntry(
             version=version,
-            path=path,
-            source=path.read_text(),
+            dir=dir,
+            source=(dir / f"schema_{version}.py").read_text(),
         )
 
     def assert_equal(self, model: ModelNode):
@@ -111,8 +115,12 @@ class ModelEntry(pydantic.BaseModel):
     def open(path: Path, model: type[pydantic.BaseModel]) -> "ModelEntry":
         return _read_schema_files(path, model)
 
-    def max_version(self) -> int | None:
+    def latest_version(self) -> int | None:
         return max(self.versions.keys()) if self.versions else None
+
+    def next_version(self) -> int:
+        latest_version = self.latest_version()
+        return latest_version + 1 if latest_version is not None else 0
 
     def update_current(self):
         if self.current is None:
@@ -120,14 +128,32 @@ class ModelEntry(pydantic.BaseModel):
         else:
             self.current.update(self.live)
 
+    def update_schemas(self, next_version: int):
+        self.update_current()
+
+        latest_version = self.latest_version()
+        if (
+            latest_version is not None
+            and self.versions[latest_version].source
+            == self.live.clean_source_recursive()
+        ):
+            print(
+                f"{self.live.node.__name__} at version {latest_version} is up to date."
+            )
+            return
+
+        self.versions[next_version] = SchemaEntry.create(
+            self.path, next_version, self.live
+        )
+
     def assert_unchanged(self):
         assert self.current, (
             f"No current version present for model {self.live.node.__name__}."
         )
         self.current.assert_unchanged(self.live)
-        max_version = self.max_version()
-        if max_version is not None:
-            self.versions[max_version].assert_equal(self.live)
+        latest_version = self.latest_version()
+        if latest_version is not None:
+            self.versions[latest_version].assert_equal(self.live)
 
 
 class SchemaFilesystem(pydantic.BaseModel):
@@ -145,6 +171,19 @@ class SchemaFilesystem(pydantic.BaseModel):
     def update_current(self):
         for model in self.models.values():
             model.update_current()
+        self.assert_unchanged_schemas()
+
+    def update_schemas(self):
+        next_version = (
+            max(model.next_version() for model in self.models.values())
+            if self.models
+            else 0
+        )
+        for model in self.models.values():
+            print(f"Updating schemas for {model.live.node.__name__}.")
+            model.update_schemas(next_version)
+            next_version = max(next_version, model.next_version())
+
         self.assert_unchanged_schemas()
 
     def assert_unchanged_schemas(self):
@@ -168,7 +207,7 @@ def _read_schema_files(at: Path, model: type[pydantic.BaseModel]) -> ModelEntry:
         elif file.name == "current.py":
             current = CurrentEntry.open(file)
         elif number is not None:
-            version[number] = SchemaEntry.open(number, file)
+            version[number] = SchemaEntry.open(at, number)
         elif migration is not None:
             migrations[migration] = MigrationEntry.open(
                 migration[0], migration[1], file
@@ -196,7 +235,7 @@ def _parse_schema_file_name(name: str) -> int | None:
 
 
 def _parse_schema_migration_file_name(name: str) -> tuple[int, int] | None:
-    if not name.startswith("schema_") or not name.endswith(".py"):
+    if not name.startswith("schema_") or not name.endswith(".py") or "_to_" not in name:
         return None
 
     from_part, to_part = name[len("schema_") : -len(".py")].split("_to_")
